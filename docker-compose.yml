@@ -1,0 +1,71 @@
+version: '3'
+
+services:
+
+  ch_server:
+    container_name: ch_server
+    build: ./server
+    networks:
+        - ch_ntw
+    ports:
+      - "8123:8123"
+    volumes:
+      - ./db:/var/lib/clickhouse
+      - ./server/users.xml:/etc/clickhouse-server/users.xml
+ 
+  ch_client:
+    container_name: ch_client
+    build: ./client
+    networks:
+        - ch_ntw
+    command:
+      - /bin/bash
+      -  -c
+      - |
+        sleep 10;
+        clickhouse-client -h ch_server -q "CREATE TABLE IF NOT EXISTS test_t (tilestamp DateTime64,message JSON) ENGINE = Memory;";
+        nc -lk -p 5170 | jq -r .log | sed 's/,\([0-9]\{3\}\) /.\1 /' | awk -v q="'" -F ' — ' '{printf "INSERT INTO test_t VALUES (%s%s%s,%s%s%s);\n",q,$$1,q,q,$$4,q}' | xargs -d'\n' -I{} clickhouse-client -h ch_server -q {}
+    depends_on:
+      - ch_server
+
+  py_app:
+    container_name: py_app
+    build: ./py_app
+    networks:
+        - ch_ntw
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: localhost:24224
+        tag: test_py
+    depends_on:
+      - fluent-bit
+      - ch_client
+    entrypoint:
+      - python3
+    command:
+      - test.py
+
+  fluent-bit:
+    container_name: fluent-bit
+    build: ./fluent-bit
+    ports:
+      - 24224:24224
+      - 24224:24224/udp
+    depends_on:
+      - ch_server
+    entrypoint:
+      - /fluent-bit/bin/fluent-bit
+    command:
+      - -i
+      - forward
+      - -o
+      - tcp://ch_client:5170
+      - -p
+      - format=json_lines
+    networks:
+        - ch_ntw
+
+networks:
+  ch_ntw:
+    driver: bridge
